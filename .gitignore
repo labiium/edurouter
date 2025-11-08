@@ -1,0 +1,16 @@
+# Build artifacts
+/target/
+/dist/
+
+# Editor and OS cruft
+.DS_Store
+.idea/
+.vscode/
+
+# Environment / secrets
+.env
+.env.*
+
+# Logs
+*.log
+logs/
