@@ -1,0 +1,47 @@
+version: "3.9"
+
+services:
+  edurouter:
+    build:
+      context: .
+    image: edurouter:e2e
+    environment:
+      ROUTER_POLICY_PATH: /app/configs/policy.json
+      ROUTER_CATALOG_PATH: /app/configs/catalog.json
+      ROUTER_OVERLAY_DIR: /app/configs/overlays
+      ROUTER_CACHE_TTL_MS: 600
+      ROUTER_CACHE_STALE_MS: 600
+    volumes:
+      - ./configs:/app/configs:ro
+    ports:
+      - "9099:9099"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9099/healthz"]
+      interval: 5s
+      timeout: 2s
+      retries: 20
+      start_period: 5s
+
+  routiium:
+    image: ghcr.io/labiium/routiium:latest
+    environment:
+      ROUTIIUM_ROUTER_URL: http://edurouter:9099
+    depends_on:
+      edurouter:
+        condition: service_healthy
+    command: ["sleep", "infinity"]
+
+  tester:
+    image: python:3.11-slim
+    working_dir: /e2e
+    environment:
+      ROUTER_URL: http://edurouter:9099
+      ROUTIIUM_URL: http://routiium:8080
+      SAMPLE_REQUESTS: "50"
+      CONCURRENCY: "4"
+      OUTPUT_PATH: /e2e/perf_report.json
+    volumes:
+      - ./e2e:/e2e
+    depends_on:
+      edurouter:
+        condition: service_healthy

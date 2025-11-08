@@ -9,7 +9,9 @@ COPY . .
 RUN cargo build --release -p router
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates wget \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /workspace
 
 COPY --from=builder /workspace/target/release/router /usr/local/bin/router
