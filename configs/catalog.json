@@ -1,0 +1,91 @@
+{
+  "revision": "cat_v1",
+  "models": [
+    {
+      "id": "gpt-4o-educator",
+      "provider": "openai",
+      "region": ["us"],
+      "aliases": [],
+      "capabilities": {
+        "modalities": ["text"],
+        "context_tokens": 16384,
+        "tools": false,
+        "json_mode": true,
+        "prompt_cache": true,
+        "structured_output": true
+      },
+      "limits": {
+        "tps": 50,
+        "rpm": 2000
+      },
+      "cost": {
+        "currency": "USD",
+        "input_per_million_micro": 1500,
+        "output_per_million_micro": 6000,
+        "cached_per_million_micro": 700
+      },
+      "slos": {
+        "target_p95_ms": 1200,
+        "recent": {
+          "p50_ms": 650,
+          "p95_ms": 1150,
+          "error_rate": 0.012,
+          "tokens_per_sec": 420
+        }
+      },
+      "policy_tags": ["tier:T1"],
+      "status": "healthy",
+      "metadata": {
+        "base_url": "https://api.openai.com/v1",
+        "mode": "responses",
+        "auth_env": "OPENAI_API_KEY",
+        "headers": {
+          "OpenAI-Beta": "assistants=v2"
+        }
+      }
+    },
+    {
+      "id": "gpt-4o-tutor",
+      "provider": "openai",
+      "region": ["us"],
+      "aliases": [],
+      "capabilities": {
+        "modalities": ["text"],
+        "context_tokens": 32768,
+        "tools": true,
+        "json_mode": true,
+        "prompt_cache": true,
+        "structured_output": true
+      },
+      "limits": {
+        "tps": 30,
+        "rpm": 1200
+      },
+      "cost": {
+        "currency": "USD",
+        "input_per_million_micro": 2800,
+        "output_per_million_micro": 8500,
+        "cached_per_million_micro": 1200
+      },
+      "slos": {
+        "target_p95_ms": 1500,
+        "recent": {
+          "p50_ms": 820,
+          "p95_ms": 1420,
+          "error_rate": 0.008,
+          "tokens_per_sec": 380
+        }
+      },
+      "policy_tags": ["tier:T3"],
+      "status": "healthy",
+      "metadata": {
+        "base_url": "https://api.openai.com/v1",
+        "mode": "responses",
+        "auth_env": "OPENAI_API_KEY",
+        "headers": {
+          "OpenAI-Beta": "assistants=v2"
+        }
+      }
+    }
+  ]
+}

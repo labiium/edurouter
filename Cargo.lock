@@ -1377,6 +1377,7 @@ dependencies = [
  "moka",
  "num_cpus",
  "parking_lot",
+ "regex",
  "serde",
  "serde_json",
  "serde_with",

@@ -2,10 +2,12 @@ use crate::cache::{CacheKey, PlanCache};
 use crate::config::RouterConfig;
 use crate::errors::RouterError;
 use crate::health::{HealthStats, HealthStore};
+use crate::rate::RateLimiter;
 use crate::stickiness::{StickinessClaims, StickinessManager};
 use crate::types::*;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
+use regex::Regex;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -91,6 +93,7 @@ struct CompiledAlias {
 struct CompiledPolicy {
     pub doc: PolicyDocument,
     alias_map: HashMap<String, CompiledAlias>,
+    escalation_regex: Option<Regex>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -108,12 +111,14 @@ struct RouterMetrics {
 pub struct RouterEngine {
     overlay_dir: String,
     cache: PlanCache,
+    cache_ttl_ms: u64,
     policy: ArcSwap<CompiledPolicy>,
     catalog: ArcSwap<CompiledCatalog>,
     overlays: ArcSwap<OverlayStore>,
     stickiness: StickinessManager,
     health: HealthStore,
     metrics: RouterMetrics,
+    rate_limiter: RateLimiter,
 }
 
 pub struct PlanOutcome {
@@ -121,6 +126,7 @@ pub struct PlanOutcome {
     pub cache_status: CacheStatus,
     pub policy_revision: String,
     pub catalog_revision: String,
+    pub route_reason: Option<String>,
 }
 
 impl RouterEngine {
@@ -129,7 +135,7 @@ impl RouterEngine {
         let compiled_policy = compile_policy(&cfg.policy, &compiled_catalog)?;
         let overlays = load_overlays(&cfg.overlay_dir)?;
 
-        let cache = PlanCache::new(MAX_CACHE_CAPACITY, cfg.cache_ttl_ms);
+        let cache = PlanCache::new(MAX_CACHE_CAPACITY, cfg.cache_ttl_ms, cfg.cache_stale_ms);
         let policy = ArcSwap::from_pointee(compiled_policy);
         let catalog = ArcSwap::from_pointee(compiled_catalog);
         let overlays = ArcSwap::from_pointee(overlays);
@@ -137,17 +143,29 @@ impl RouterEngine {
         Ok(Self {
             overlay_dir: cfg.overlay_dir.to_string_lossy().into_owned(),
             cache,
+            cache_ttl_ms: cfg.cache_ttl_ms,
             policy,
             catalog,
             overlays,
             stickiness: StickinessManager::new(cfg.sticky_secret.clone()),
             health: HealthStore::new(),
             metrics: RouterMetrics::default(),
+            rate_limiter: RateLimiter::new(cfg.rate_limit_burst, cfg.rate_limit_refill_per_sec),
         })
     }
 
     pub fn health(&self) -> &HealthStore {
         &self.health
+    }
+
+    pub fn check_rate_limit(&self, key: &str) -> Result<(), RouterError> {
+        if self.rate_limiter.check(key) {
+            Ok(())
+        } else {
+            Err(RouterError::PolicyDeny(format!(
+                "rate limit exceeded for {key}"
+            )))
+        }
     }
 
     pub async fn reload_policy(&self, doc: PolicyDocument) -> Result<(), RouterError> {
@@ -222,6 +240,28 @@ impl RouterEngine {
             .and_then(|claims| catalog.index.get(&claims.model_id))
             .copied()
             .unwrap_or_default() as u32;
+        let content_used = determine_content_usage(&req);
+        let freeze_key = freeze_key_from_request(&req, &policy.doc.revision);
+        let prompt_overlays = resolve_overlay(
+            &req,
+            &policy.doc,
+            &overlays,
+            policy.doc.defaults.max_overlay_bytes,
+        )?;
+        let overlay_hash = hash_string(
+            prompt_overlays
+                .overlay_fingerprint
+                .as_deref()
+                .unwrap_or("overlay:none"),
+        );
+        let (forced_tier, mut base_reason) = determine_escalation(
+            &req,
+            &policy.doc,
+            policy.escalation_regex.as_ref(),
+            in_tokens,
+            boost,
+        );
+        let forced_tag = forced_tier.as_ref().map(|tier| format!("tier:{}", tier));
 
         let cache_key = CacheKey::derive(
             &policy.doc.revision,
@@ -233,16 +273,24 @@ impl RouterEngine {
             region_mask.bits(),
             boost,
             plan_token_model,
+            overlay_hash,
+            req.privacy_mode,
+            req.api,
+            hash_string(&freeze_key),
         );
 
-        if let Some(plan) = self.cache.get(&cache_key).await {
-            let mut response_plan = (*plan).clone();
+        if let Some(hit) = self.cache.get(&cache_key).await {
+            let mut response_plan = (*hit.plan).clone();
             self.attach_stickiness(
                 &policy.doc,
                 &req,
                 &mut response_plan,
                 sticky_claims.as_ref(),
             )?;
+            let mut effective_reason = hit.route_reason.clone();
+            if sticky_claims.is_some() {
+                effective_reason = Some("policy_lock".into());
+            }
             self.metrics
                 .total_requests
                 .entry(req.alias.clone())
@@ -255,28 +303,54 @@ impl RouterEngine {
                 .or_insert(1);
             return Ok(PlanOutcome {
                 plan: response_plan,
-                cache_status: CacheStatus::Hit,
+                cache_status: hit.status,
                 policy_revision: policy.doc.revision.clone(),
                 catalog_revision: catalog.revision.clone(),
+                route_reason: effective_reason,
             });
         }
 
-        // Candidate scoring
-        let candidates = score_candidates(
-            &req,
+        let forced_tag_value = forced_tag.clone();
+        let mut candidates = score_candidates(ScoreContext {
+            req: &req,
             alias,
-            &policy.doc,
+            policy: &policy.doc,
+            catalog: &catalog,
+            health: &self.health,
             caps_mask,
             in_tokens,
             out_tokens,
             region_mask,
             boost,
-            &catalog,
-            &self.health,
-        )?;
+            forced_tier: forced_tag_value.as_deref(),
+        })?;
+        if candidates.is_empty() && forced_tag_value.is_some() {
+            base_reason = None;
+            candidates = score_candidates(ScoreContext {
+                req: &req,
+                alias,
+                policy: &policy.doc,
+                catalog: &catalog,
+                health: &self.health,
+                caps_mask,
+                in_tokens,
+                out_tokens,
+                region_mask,
+                boost,
+                forced_tier: None,
+            })?;
+        }
 
         let best = choose_primary(&candidates, sticky_claims.as_ref(), &req.alias)
             .ok_or_else(|| RouterError::Planning("no candidates after scoring".into()))?;
+
+        if sticky_claims
+            .as_ref()
+            .map(|claims| claims.alias == req.alias && claims.model_id == best.model.id)
+            .unwrap_or(false)
+        {
+            base_reason = Some("policy_lock".into());
+        }
 
         let fallbacks = build_fallbacks(&candidates, best)
             .into_iter()
@@ -289,25 +363,32 @@ impl RouterEngine {
             })
             .collect::<Vec<_>>();
 
-        let plan_blueprint = materialize_plan(
-            &req,
-            &policy.doc,
-            &overlays,
-            best,
-            &fallbacks,
-            in_tokens,
+        let catalog_revision = catalog.revision.clone();
+        let plan_blueprint = materialize_plan(PlanAssembly {
+            req: &req,
+            policy: &policy.doc,
+            prompt_overlays,
+            primary: best,
+            fallbacks: &fallbacks,
             out_tokens,
-        )?;
+            content_used,
+            cache_ttl_ms: self.cache_ttl_ms as u32,
+            freeze_key,
+            catalog_revision: &catalog_revision,
+        })?;
         let mut response_plan = plan_blueprint.clone();
-        self.attach_stickiness(
+        let issued_stickiness = self.attach_stickiness(
             &policy.doc,
             &req,
             &mut response_plan,
             sticky_claims.as_ref(),
         )?;
+        let valid_until = issued_stickiness.map(|claims| claims.expires_at);
 
         let plan_arc = Arc::new(plan_blueprint);
-        self.cache.insert(cache_key, plan_arc).await;
+        self.cache
+            .insert(cache_key, plan_arc, valid_until, base_reason.clone())
+            .await;
 
         self.metrics
             .model_share
@@ -324,7 +405,8 @@ impl RouterEngine {
             plan: response_plan,
             cache_status: CacheStatus::Miss,
             policy_revision: policy.doc.revision.clone(),
-            catalog_revision: catalog.revision.clone(),
+            catalog_revision,
+            route_reason: base_reason,
         })
     }
 
@@ -372,6 +454,41 @@ struct CandidateRef<'a> {
     est_cost_micro: u64,
     est_latency_ms: u32,
     penalty: f32,
+}
+
+struct ScoreContext<'req, 'a, 'tier> {
+    req: &'req RouteRequest,
+    alias: &'a CompiledAlias,
+    policy: &'req PolicyDocument,
+    catalog: &'a CompiledCatalog,
+    health: &'req HealthStore,
+    caps_mask: CapabilityFlags,
+    in_tokens: u32,
+    out_tokens: u32,
+    region_mask: RegionMask,
+    boost: bool,
+    forced_tier: Option<&'tier str>,
+}
+
+#[derive(Clone, Copy)]
+struct ScoreFactors {
+    est_cost_micro: u64,
+    est_latency_ms: u32,
+    in_tokens: u32,
+    out_tokens: u32,
+}
+
+struct PlanAssembly<'req, 'a> {
+    req: &'req RouteRequest,
+    policy: &'req PolicyDocument,
+    prompt_overlays: PromptOverlays,
+    primary: &'a CandidateRef<'a>,
+    fallbacks: &'a [Fallback],
+    out_tokens: u32,
+    content_used: ContentLevel,
+    cache_ttl_ms: u32,
+    freeze_key: String,
+    catalog_revision: &'req str,
 }
 
 fn compile_catalog(doc: &CatalogDocument) -> Result<CompiledCatalog, RouterError> {
@@ -523,9 +640,16 @@ fn compile_policy(
         );
     }
 
+    let escalation_regex = doc
+        .escalations
+        .uncertainty_regex
+        .as_ref()
+        .and_then(|pattern| Regex::new(pattern).ok());
+
     Ok(CompiledPolicy {
         doc: doc.clone(),
         alias_map,
+        escalation_regex,
     })
 }
 
@@ -557,7 +681,7 @@ fn region_from_request(req: &RouteRequest) -> RegionMask {
         .as_ref()
         .and_then(|geo| geo.region.as_ref())
         .map(|region| region_from_str(region))
-        .unwrap_or(RegionMask::GLOBAL)
+        .unwrap_or_else(RegionMask::all)
 }
 
 fn region_from_str(region: &str) -> RegionMask {
@@ -638,63 +762,159 @@ fn hash_alias(alias: &str) -> u64 {
     hasher.finish()
 }
 
-fn score_candidates<'a>(
+fn determine_content_usage(req: &RouteRequest) -> ContentLevel {
+    if let Some(attestation) = req.content_attestation.as_ref() {
+        return attestation.included;
+    }
+    match req.privacy_mode {
+        PrivacyMode::FeaturesOnly => ContentLevel::None,
+        PrivacyMode::Summary => ContentLevel::Summary,
+        PrivacyMode::Full => ContentLevel::Full,
+    }
+}
+
+fn freeze_key_from_request(req: &RouteRequest, policy_rev: &str) -> String {
+    req.overrides
+        .as_ref()
+        .and_then(|ov| ov.get("freeze_key"))
+        .and_then(Value::as_str)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("frz_{}", policy_rev))
+}
+
+fn determine_escalation(
     req: &RouteRequest,
-    alias: &'a CompiledAlias,
-    doc: &PolicyDocument,
-    caps_mask: CapabilityFlags,
+    policy: &PolicyDocument,
+    regex: Option<&Regex>,
     in_tokens: u32,
-    out_tokens: u32,
-    region_mask: RegionMask,
-    boost: bool,
-    catalog: &'a CompiledCatalog,
-    health: &HealthStore,
+    teacher_boost: bool,
+) -> (Option<String>, Option<String>) {
+    let fallback = policy
+        .escalations
+        .fallback_tier
+        .clone()
+        .unwrap_or_else(|| "T3".into());
+    let fallback = fallback.to_ascii_uppercase();
+
+    if teacher_boost {
+        if let Some(target) = policy
+            .escalations
+            .teacher_boost_tier
+            .clone()
+            .or_else(|| Some(fallback.clone()))
+        {
+            return (
+                Some(target.to_ascii_uppercase()),
+                Some("teacher_boost".into()),
+            );
+        }
+    }
+
+    if let Some(limit) = policy.escalations.token_len_over {
+        if in_tokens > limit {
+            return (Some(fallback.clone()), Some("complexity".into()));
+        }
+    }
+
+    if let (Some(re), Some(summary)) = (
+        regex,
+        req.conversation
+            .as_ref()
+            .and_then(|conv| conv.summary.as_ref()),
+    ) {
+        if re.is_match(summary) {
+            return (Some(fallback.clone()), Some("uncertainty".into()));
+        }
+    }
+
+    if policy.escalations.scpi_error_present.unwrap_or(false)
+        && req
+            .overrides
+            .as_ref()
+            .and_then(|ov| ov.get("scpi_error_present"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    {
+        return (Some(fallback), Some("policy_lock".into()));
+    }
+
+    (None, None)
+}
+
+fn hash_string(value: &str) -> u64 {
+    use ahash::AHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = AHasher::default();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn score_candidates<'req, 'a, 'tier>(
+    ctx: ScoreContext<'req, 'a, 'tier>,
 ) -> Result<Vec<CandidateRef<'a>>, RouterError> {
     let mut scored = Vec::new();
-    for idx in &alias.candidates {
-        let model = catalog
+    for idx in &ctx.alias.candidates {
+        let model = ctx
+            .catalog
             .models
             .get(*idx)
             .ok_or_else(|| RouterError::UnknownModel(format!("unknown model idx {idx}")))?;
-        if !model.capabilities.contains(caps_mask | alias.require_caps) {
+        if !model
+            .capabilities
+            .contains(ctx.caps_mask | ctx.alias.require_caps)
+        {
             continue;
         }
-        if !alias.allowed_regions.intersects(region_mask) {
+        if !ctx.alias.allowed_regions.intersects(ctx.region_mask) {
             continue;
         }
-        if !region_mask.intersects(model.regions) && !model.regions.contains(RegionMask::GLOBAL) {
+        if !ctx.region_mask.intersects(model.regions) && !model.regions.contains(RegionMask::GLOBAL)
+        {
             continue;
         }
-        if model.context_tokens < in_tokens + out_tokens {
+        if model.context_tokens < ctx.in_tokens + ctx.out_tokens {
             continue;
         }
         if model.status == ModelStatus::Offline {
             continue;
         }
+        if let Some(tag) = ctx.forced_tier {
+            if !model
+                .policy_tags
+                .iter()
+                .any(|entry| entry.eq_ignore_ascii_case(tag))
+            {
+                continue;
+            }
+        }
 
         let use_prompt_cache = model.capabilities.contains(CapabilityFlags::PROMPT_CACHE)
-            && (req
+            && (ctx
+                .req
                 .conversation
                 .as_ref()
                 .and_then(|conv| conv.turns)
                 .unwrap_or(0)
                 > 0
-                || req
+                || ctx
+                    .req
                     .overrides
                     .as_ref()
                     .and_then(|ov| ov.get("plan_token"))
                     .is_some());
 
-        let est_cost_micro = estimate_cost_micro(model, in_tokens, out_tokens, use_prompt_cache);
-        if let Some(budget) = &req.budget {
+        let est_cost_micro =
+            estimate_cost_micro(model, ctx.in_tokens, ctx.out_tokens, use_prompt_cache);
+        if let Some(budget) = &ctx.req.budget {
             if est_cost_micro > budget.amount_micro {
                 continue;
             }
         }
 
-        let health_snapshot = health.snapshot(&model.id);
-        let est_latency_ms = estimate_latency(model, &health_snapshot, in_tokens, out_tokens);
-        if let Some(targets) = req.targets.as_ref() {
+        let health_snapshot = ctx.health.snapshot(&model.id);
+        let est_latency_ms =
+            estimate_latency(model, &health_snapshot, ctx.in_tokens, ctx.out_tokens);
+        if let Some(targets) = ctx.req.targets.as_ref() {
             if let Some(max_latency) = targets.p95_latency_ms {
                 if est_latency_ms > max_latency {
                     continue;
@@ -705,12 +925,14 @@ fn score_candidates<'a>(
         let score = compute_score(
             model,
             &health_snapshot,
-            est_cost_micro,
-            est_latency_ms,
-            in_tokens,
-            out_tokens,
-            doc,
-            boost,
+            ScoreFactors {
+                est_cost_micro,
+                est_latency_ms,
+                in_tokens: ctx.in_tokens,
+                out_tokens: ctx.out_tokens,
+            },
+            ctx.policy,
+            ctx.boost,
         );
 
         scored.push(CandidateRef {
@@ -774,29 +996,32 @@ fn estimate_latency(
 fn compute_score(
     model: &CompiledModel,
     health: &HealthStats,
-    est_cost_micro: u64,
-    est_latency_ms: u32,
-    in_tokens: u32,
-    out_tokens: u32,
+    factors: ScoreFactors,
     policy: &PolicyDocument,
     boost: bool,
 ) -> f32 {
     let defaults = &policy.defaults;
     let weights = &policy.weights;
-    let cost_ratio = (est_cost_micro as f32 / defaults.cost_norm_micro).min(1.5);
-    let latency_ratio = (est_latency_ms as f32 / defaults.latency_ms).min(1.5);
+    let cost_ratio = (factors.est_cost_micro as f32 / defaults.cost_norm_micro).min(1.5);
+    let latency_ratio = (factors.est_latency_ms as f32 / defaults.latency_ms).min(1.5);
     let fit_cost = 1.0 - cost_ratio;
     let fit_latency = 1.0 - latency_ratio;
     let fit_health = (1.0 - health.err_rate * 5.0).clamp(0.0, 1.0);
-    let fit_context = (model.context_tokens as f32 / (in_tokens + out_tokens + 32) as f32).min(1.0);
+    let fit_context = (model.context_tokens as f32
+        / (factors.in_tokens + factors.out_tokens + 32) as f32)
+        .min(1.0);
     let mut score = weights.cost * fit_cost
         + weights.latency * fit_latency
         + weights.health * fit_health
         + weights.context * fit_context;
 
-    if boost {
-        score += weights.tier_bonus;
-    } else if model.policy_tags.iter().any(|tag| tag == "tier:T1") {
+    let has_bonus = boost
+        || model
+            .policy_tags
+            .iter()
+            .any(|tag| tag.eq_ignore_ascii_case("tier:T1"));
+
+    if has_bonus {
         score += weights.tier_bonus;
     }
 
@@ -836,76 +1061,65 @@ fn choose_primary<'a>(
     candidates.first()
 }
 
-fn materialize_plan(
-    req: &RouteRequest,
-    policy: &PolicyDocument,
-    overlays: &OverlayStore,
-    best: &CandidateRef,
-    fallbacks: &[Fallback],
-    _in_tokens: u32,
-    out_tokens: u32,
-) -> Result<RoutePlan, RouterError> {
-    let policy_revision = policy.revision.clone();
-    let cache_ttl_ms = policy.defaults.stickiness.window_ms as u32;
-    let mut plan = RoutePlan {
-        schema_version: req.schema_version.clone(),
+fn materialize_plan(ctx: PlanAssembly<'_, '_>) -> Result<RoutePlan, RouterError> {
+    let policy_revision = ctx.policy.revision.clone();
+    let plan = RoutePlan {
+        schema_version: ctx.req.schema_version.clone(),
         route_id: Uuid::new_v4().to_string(),
         upstream: Upstream {
-            base_url: best.model.base_url.clone(),
-            mode: best.model.mode.clone(),
-            model_id: best.model.id.clone(),
-            auth_env: best.model.auth_env.clone(),
-            headers: best.model.headers.clone(),
+            base_url: ctx.primary.model.base_url.clone(),
+            mode: ctx.primary.model.mode.clone(),
+            model_id: ctx.primary.model.id.clone(),
+            auth_env: ctx.primary.model.auth_env.clone(),
+            headers: ctx.primary.model.headers.clone(),
         },
-        limits: Some(Limits {
-            max_input_tokens: Some(best.model.context_tokens),
-            max_output_tokens: Some(out_tokens.min(policy.defaults.max_output_tokens)),
-            timeout_ms: Some(policy.defaults.timeout_ms),
-        }),
-        prompt_overlays: None,
-        hints: Some(Hints {
-            tier: best
+        limits: Limits {
+            max_input_tokens: Some(ctx.primary.model.context_tokens),
+            max_output_tokens: Some(ctx.out_tokens.min(ctx.policy.defaults.max_output_tokens)),
+            timeout_ms: Some(ctx.policy.defaults.timeout_ms),
+        },
+        prompt_overlays: ctx.prompt_overlays,
+        hints: Hints {
+            tier: ctx
+                .primary
                 .model
                 .policy_tags
                 .iter()
-                .find(|tag| tag.starts_with("tier:"))
-                .cloned(),
-            est_cost_micro: Some(best.est_cost_micro),
+                .find_map(|tag| tag.strip_prefix("tier:").map(|tier| tier.to_string())),
+            est_cost_micro: Some(ctx.primary.est_cost_micro),
             currency: Some(
-                req.budget
+                ctx.req
+                    .budget
                     .as_ref()
                     .map(|b| b.currency.clone())
                     .unwrap_or_else(|| "USD".into()),
             ),
-            est_latency_ms: Some(best.est_latency_ms),
-            provider: Some(best.model.provider.clone()),
-        }),
-        fallbacks: if fallbacks.is_empty() {
-            None
-        } else {
-            Some(fallbacks.to_vec())
+            est_latency_ms: Some(ctx.primary.est_latency_ms),
+            provider: Some(ctx.primary.model.provider.clone()),
         },
-        cache: Some(CacheHints {
-            ttl_ms: Some(cache_ttl_ms),
-            etag: Some(policy_revision.clone()),
+        fallbacks: ctx.fallbacks.to_vec(),
+        cache: CacheHints {
+            ttl_ms: Some(ctx.cache_ttl_ms),
+            etag: Some(format!(
+                "W/\"cat_{}@pol_{}\"",
+                ctx.catalog_revision, policy_revision
+            )),
             valid_until: None,
-            freeze_key: None,
-        }),
-        stickiness: None,
-        policy: Some(PolicyInfo {
-            revision: Some(policy_revision),
-            id: Some("default".into()),
+            freeze_key: Some(ctx.freeze_key),
+        },
+        stickiness: Stickiness::default(),
+        policy: PolicyInfo {
+            revision: Some(policy_revision.clone()),
+            id: Some(ctx.policy.id.clone()),
             explain: Some(format!(
                 "score={:.3} cost={}µ latency={}ms",
-                best.score, best.est_cost_micro, best.est_latency_ms
+                ctx.primary.score, ctx.primary.est_cost_micro, ctx.primary.est_latency_ms
             )),
-        }),
-        content_used: Some(ContentLevel::None),
+        },
+        policy_rev: policy_revision.clone(),
+        content_used: ctx.content_used,
+        governance_echo: ctx.policy.governance.clone(),
     };
-
-    if let Some(prompt_overlay) = resolve_overlay(req, policy, overlays) {
-        plan.prompt_overlays = Some(prompt_overlay);
-    }
 
     Ok(plan)
 }
@@ -914,7 +1128,8 @@ fn resolve_overlay(
     req: &RouteRequest,
     policy: &PolicyDocument,
     overlays: &OverlayStore,
-) -> Option<PromptOverlays> {
+    max_overlay_bytes: u32,
+) -> Result<PromptOverlays, RouterError> {
     let role = req
         .org
         .as_ref()
@@ -926,19 +1141,33 @@ fn resolve_overlay(
         .and_then(|map| map.get(&role).cloned())
         .or_else(|| policy.overlay_defaults.get(&role).cloned());
 
-    overlay_id.and_then(|id| {
-        overlays.content.get(&id).map(|content| {
+    let mut block = PromptOverlays {
+        system_overlay: None,
+        overlay_fingerprint: None,
+        overlay_size_bytes: Some(0),
+        max_overlay_bytes: Some(max_overlay_bytes),
+    };
+
+    if let Some(id) = overlay_id {
+        if let Some(content) = overlays.content.get(&id) {
+            let size = content.len() as u32;
+            if size > max_overlay_bytes {
+                return Err(RouterError::PolicyDeny(format!(
+                    "overlay {id} exceeds max_overlay_bytes ({size} > {max_overlay_bytes})"
+                )));
+            }
             let mut hasher = Sha256::new();
             hasher.update(content.as_bytes());
             let fingerprint = format!("sha256:{}", hex::encode(hasher.finalize()));
-            PromptOverlays {
-                system_overlay: Some(content.clone()),
-                overlay_fingerprint: Some(fingerprint),
-                overlay_size_bytes: Some(content.len() as u32),
-                max_overlay_bytes: None,
-            }
-        })
-    })
+            block.system_overlay = Some(content.clone());
+            block.overlay_fingerprint = Some(fingerprint);
+            block.overlay_size_bytes = Some(size);
+        } else {
+            block.overlay_fingerprint = Some(format!("missing:{id}"));
+        }
+    }
+
+    Ok(block)
 }
 
 fn calc_cache_ratio(metrics: &RouterMetrics) -> f32 {
@@ -962,11 +1191,11 @@ impl RouterEngine {
         req: &RouteRequest,
         plan: &mut RoutePlan,
         existing: Option<&StickinessClaims>,
-    ) -> Result<(), RouterError> {
+    ) -> Result<Option<StickinessClaims>, RouterError> {
         let cfg = &policy.defaults.stickiness;
         if cfg.max_turns == 0 || cfg.window_ms == 0 {
-            plan.stickiness = None;
-            return Ok(());
+            plan.stickiness = Stickiness::default();
+            return Ok(None);
         }
 
         let tenant = req.org.as_ref().and_then(|org| org.tenant.as_deref());
@@ -989,14 +1218,12 @@ impl RouterEngine {
             )?,
         };
 
-        plan.stickiness = Some(Stickiness {
+        plan.stickiness = Stickiness {
             plan_token: Some(token),
             max_turns: Some(cfg.max_turns),
             expires_at: Some(claims.expires_at.to_rfc3339()),
-        });
-        if let Some(cache) = plan.cache.as_mut() {
-            cache.valid_until = Some(claims.expires_at.to_rfc3339());
-        }
-        Ok(())
+        };
+        plan.cache.valid_until = Some(claims.expires_at.to_rfc3339());
+        Ok(Some(claims))
     }
 }

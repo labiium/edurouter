@@ -46,9 +46,8 @@ Refer to [API_REFERENCE.md](API_REFERENCE.md) for exhaustive request/response do
 ```bash
 git clone https://github.com/labiium/edurouter.git
 cd edurouter
-cp configs/policy.example.json configs/policy.json
-cp configs/catalog.example.json configs/catalog.json
-mkdir -p configs/overlays && cp overlays/*.txt configs/overlays/
+# Edit configs/policy.json, configs/catalog.json, and the overlays under configs/overlays/
+# to match your upstreams, tiers, and prompts.
 ```
 
 Update the policy and catalog to match your upstreams, capabilities, and tiers.
@@ -74,7 +73,7 @@ curl -s http://localhost:9099/route/plan \
   -d '{
         "schema_version": "1.1",
         "request_id": "demo-1",
-        "alias": "gpt-4o-educator",
+        "alias": "edu-general",
         "api": "responses",
         "privacy_mode": "features_only",
         "stream": true
@@ -145,13 +144,13 @@ Each model entry should define:
 
 - **Health probe** - `GET /healthz` returns `{ status, policy_revision, catalog_revision, timestamp }`.
 - **Router stats** - `GET /stats` exposes cache hit ratio, per-model share, and total requests.
-- **Catalog/policy introspection** - `GET /catalog/models` and `GET /policy` return the live documents Routiium consumes.
+- **Catalog/policy introspection** - `GET /catalog/models` and `GET /policy` return the live documents Routiium consumes; `GET /capabilities` advertises privacy/stickiness support knobs.
 - **Admin reloads** -
   - `POST /admin/policy` (body: policy document) reloads aliases/weights.
   - `POST /admin/catalog` reloads model metadata.
   - `POST /admin/overlays/reload` refreshes overlay files from disk.
-- **Plan response headers** - Each `/route/plan` response includes `Router-Schema`, `Router-Latency`, `Config-Revision`, `Catalog-Revision`, `X-Route-Cache`, `X-Resolved-Model`, `X-Route-Id`, `X-Route-Tier`, and `X-Content-Used` for traceability.
-- **Error envelope** - Failures return JSON `{ "error": "<slug>", "message": "details" }` (400 for unknown alias, 403 for invalid stickiness token, 500 otherwise).
+- **Plan response headers** - Each `/route/plan` response includes `Router-Schema`, `Router-Latency`, `Config-Revision`, `Catalog-Revision`, `X-Route-Cache`, `X-Route-Id`, `X-Resolved-Model`, `X-Route-Tier`, `X-Route-Provider`, `X-Policy-Rev`, `X-Content-Used`, and optional context headers such as `X-Route-Why`, `traceparent`, and `tracestate`.
+- **Error envelope** - Failures return typed JSON `{"schema_version":"1.1","code":"ALIAS_UNKNOWN","message":"...","request_id":"...","policy_rev":"...","retry_hint_ms":60000}` with HTTP status mapped to the code (404/409/403/402/503/502/400/409/500).
 
 Comprehensive payload, header, and error details live in [API_REFERENCE.md](API_REFERENCE.md).
 

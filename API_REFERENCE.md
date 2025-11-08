@@ -12,7 +12,7 @@ EduRouter implements the Routiium Router Schema 1.1 surface. Use this document t
 - Timestamps use RFC 3339 / ISO 8601 strings with UTC offsets, e.g., `2024-05-12T17:14:01Z`.
 - Currency fields use micro-units (1e-6 of the currency) to match Routiium's pricing math.
 - Optional objects may be omitted or set to `null`.
-- Errors always return JSON bodies of the form `{ "error": "<slug>", "message": "details" }`.
+- Errors always return typed JSON bodies such as `{"schema_version":"1.1","code":"ALIAS_UNKNOWN","message":"details","request_id":"req-123","policy_rev":"pol_v1","retry_hint_ms":60000}`.
 
 ## Type Reference
 
@@ -46,14 +46,16 @@ EduRouter implements the Routiium Router Schema 1.1 surface. Use this document t
 | `schema_version` | string | Echoes the request version. |
 | `route_id` | string | Unique identifier for the generated plan (appears in headers). |
 | `upstream` | object | `{ "base_url": string, "mode": "responses"|"chat", "model_id": string, "auth_env": string?, "headers": object }`. |
-| `limits` | object | Optional `{ "max_input_tokens": u32, "max_output_tokens": u32, "timeout_ms": u32 }`. |
-| `prompt_overlays` | object | Optional overlay payload and fingerprint metadata. |
-| `hints` | object | Optional `{ "tier": string?, "est_cost_micro": u64?, "currency": string?, "est_latency_ms": u32?, "provider": string? }`. |
-| `fallbacks` | array | Optional list of alternate upstreams (same shape as `upstream` plus `reason` and `penalty`). |
-| `cache` | object | `{ "ttl_ms": u32?, "etag": string?, "valid_until": string?, "freeze_key": string? }`. |
+| `limits` | object | `{ "max_input_tokens": u32, "max_output_tokens": u32, "timeout_ms": u32 }`; when values are unknown they will be `null` but the object is always present. |
+| `prompt_overlays` | object | Overlay payload metadata including `system_overlay` content (or `null`), `overlay_fingerprint`, `overlay_size_bytes`, and `max_overlay_bytes`. |
+| `hints` | object | `{ "tier": string?, "est_cost_micro": u64?, "currency": string?, "est_latency_ms": u32?, "provider": string? }`. |
+| `fallbacks` | array | List of alternate upstreams (may be empty). Each entry mirrors `upstream` plus `reason` and `penalty`. |
+| `cache` | object | `{ "ttl_ms": u32, "etag": string, "valid_until": string?, "freeze_key": string }`. |
 | `stickiness` | object | `{ "plan_token": string?, "max_turns": u8?, "expires_at": string? }` used by Routiium for conversational routing. |
 | `policy` | object | `{ "revision": string?, "id": string?, "explain": string? }`. |
+| `policy_rev` | string | Flattened policy revision for legacy clients (also surfaced in headers). |
 | `content_used` | enum | `"none"`, `"summary"`, or `"full"`; indicates how much request content the router consumed. |
+| `governance_echo` | object | Governance metadata (`budgets`, `approvals`) echoed from the policy for EDU dashboards. |
 
 ### RouteFeedback
 
@@ -122,52 +124,70 @@ Example response:
 ```json
 {
   "schema_version": "1.1",
-  "route_id": "c21d7c8d-36b2-4ef0-a3f7-7a7fa9d6d1a0",
+  "route_id": "rte_01JPQ3TK9XAQ5C4C7F9G6H7J8K",
   "upstream": {
     "base_url": "https://api.openai.com/v1",
     "mode": "responses",
-    "model_id": "gpt-4o-mini",
+    "model_id": "gpt-4o-educator",
     "auth_env": "OPENAI_API_KEY",
     "headers": {
-      "x-edu-tier": "teacher"
+      "OpenAI-Beta": "assistants=v2"
     }
   },
   "limits": {
-    "max_input_tokens": 8192,
-    "max_output_tokens": 2048,
-    "timeout_ms": 60000
+    "max_input_tokens": 16384,
+    "max_output_tokens": 512,
+    "timeout_ms": 20000
+  },
+  "prompt_overlays": {
+    "system_overlay": "You are EduRouter's diagnostic overlay. Start with a quick triage checklist...",
+    "overlay_fingerprint": "sha256:7d2ce5df3df3e95e63b0b2387838de3ce65e6d86e7f66bcb2d3f233f1e0d6db7",
+    "overlay_size_bytes": 142,
+    "max_overlay_bytes": 16384
   },
   "hints": {
-    "tier": "tier:T1",
-    "est_cost_micro": 25000,
+    "tier": "T1",
+    "est_cost_micro": 3100,
     "currency": "USD",
-    "est_latency_ms": 900,
+    "est_latency_ms": 880,
     "provider": "openai"
   },
   "fallbacks": [
     {
       "base_url": "https://api.anthropic.com/v1",
       "mode": "responses",
-      "model_id": "claude-3-sonnet",
+      "model_id": "gpt-4o-tutor",
       "reason": "alternate",
       "penalty": 0.1
     }
   ],
   "cache": {
-    "ttl_ms": 15000,
-    "etag": "rev-2024-05-01"
+    "ttl_ms": 600,
+    "etag": "W/\"cat_v1@pol_v1\"",
+    "valid_until": "2024-05-12T17:25:02Z",
+    "freeze_key": "frz_pol_v1"
   },
   "stickiness": {
     "plan_token": "eyJ0b2tlbiI6ICJ...",
-    "max_turns": 4,
+    "max_turns": 3,
     "expires_at": "2024-05-12T17:25:02Z"
   },
   "policy": {
-    "revision": "rev-2024-05-01",
-    "id": "default",
-    "explain": "score=0.87 cost=25000u latency=900ms"
+    "revision": "pol_v1",
+    "id": "edu_cost_routed_v5",
+    "explain": "score=0.87 cost=3100µ latency=880ms"
   },
-  "content_used": "none"
+  "policy_rev": "pol_v1",
+  "content_used": "none",
+  "governance_echo": {
+    "budgets": {
+      "total": 5,
+      "l3_max": 2
+    },
+    "approvals": {
+      "require_for_levels": ["L3"]
+    }
+  }
 }
 ```
 
@@ -183,7 +203,11 @@ Response headers:
 | `X-Resolved-Model` | Primary model ID selected. |
 | `X-Route-Id` | Same as `route_id` in the JSON body. |
 | `X-Route-Tier` | Present when `hints.tier` is set. |
+| `X-Route-Provider` | Provider hint attached to the plan. |
+| `X-Policy-Rev` | Flattened policy revision (`plan.policy_rev`). |
+| `X-Route-Why` | Reason for escalation (`complexity`, `uncertainty`, `teacher_boost`, `policy_lock`, etc.) when applicable. |
 | `X-Content-Used` | Indicates how much request content the router consumed (`none|summary|full`). |
+| `traceparent` / `tracestate` | Echoed when the client supplied trace context. |
 
 ### POST /route/feedback
 
@@ -215,6 +239,8 @@ curl -X POST http://localhost:9099/route/feedback \
 Returns the live catalog document loaded from `ROUTER_CATALOG_PATH`.
 
 - **Success:** `200 OK`
+- **Conditional:** Sends `304 Not Modified` when `If-None-Match` matches either the strong `ETag: "<revision>"` or weak `X-Catalog-Weak: W/"<revision>"` header.
+- **Headers:** `ETag`, `X-Catalog-Weak`, `X-Catalog-Revision`.
 - **Body:** `CatalogDocument` (see `src/types.rs`).
 
 ### GET /policy
@@ -285,15 +311,28 @@ curl -X POST http://localhost:9099/admin/overlays/reload
 
 Response: `204 No Content`.
 
+### GET /capabilities
+
+Expose routing capabilities for automation and simulator bring-up.
+
+- **Success:** `200 OK`
+- **Body:** `{ "schema_version": "1.1", "privacy_modes": ["features_only","summary","full"], "stickiness": { "supported": true, "max_turns": 3, "window_ms": 600 }, "batch": { "supported": false }, "prefetch": { "supported": false }, "provider_headers": true }`
+
 ## Error Codes
 
-| HTTP Status | `error` slug | When it occurs |
-| ----------- | ------------ | -------------- |
-| `400 Bad Request` | `unknown_alias` | Alias not found in the policy document. |
-| `403 Forbidden` | `invalid_approval` | Stickiness token cannot be verified or is expired. |
-| `500 Internal Server Error` | `unknown_model`, `planning_error`, `io_error`, `internal_error` | Any other issue while compiling policy/catalog, scoring, or reading files. |
+| HTTP Status | `code` | When it occurs |
+| ----------- | ------ | -------------- |
+| `404 Not Found` | `ALIAS_UNKNOWN` | Alias not found in the policy document. |
+| `409 Conflict` | `UNSUPPORTED_SCHEMA` | Request `schema_version` is not supported (`supported` array lists allowed versions). |
+| `403 Forbidden` | `INVALID_APPROVAL` | Stickiness token cannot be verified or is expired. |
+| `402 Payment Required` | `BUDGET_EXCEEDED` | Estimated cost exceeds the request budget (when enforced server-side). |
+| `503 Service Unavailable` | `CATALOG_UNAVAILABLE` | Catalog or policy data not yet loaded. |
+| `502 Bad Gateway` | `UPSTREAM_UNAVAILABLE` | All candidates filtered due to upstream health. |
+| `400 Bad Request` | `INVALID_REQUEST` | Malformed JSON, missing `request_id`, overlay too large, or rate-limit overflow. |
+| `409 Conflict` | `POLICY_DENY` | Policy rules (privacy, freeze keys, overlays) prohibit routing. |
+| `500 Internal Server Error` | `PLANNING_FAILED` / `INTERNAL_ERROR` | Any other issue while compiling policy/catalog, scoring, or reading files. |
 
-Retries are safe for `500` errors. For `400` errors you must fix the request (e.g., use a valid alias). For `403`, obtain a fresh plan token by omitting the stale `plan_token` override.
+Retries are safe for `500`, `503`, and `502` errors. For `4xx` errors you must fix the request (e.g., use a valid alias or omit the stale `plan_token` override).
 
 ## Integration Tips
 

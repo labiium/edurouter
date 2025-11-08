@@ -15,9 +15,12 @@ pub struct RouterConfig {
     pub server: ServerConfig,
     pub overlay_dir: PathBuf,
     pub cache_ttl_ms: u64,
+    pub cache_stale_ms: u64,
     pub sticky_secret: Vec<u8>,
     pub policy: PolicyDocument,
     pub catalog: CatalogDocument,
+    pub rate_limit_burst: f64,
+    pub rate_limit_refill_per_sec: f64,
 }
 
 impl RouterConfig {
@@ -41,6 +44,18 @@ impl RouterConfig {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(15_000);
+        let cache_stale_ms = env::var("ROUTER_CACHE_STALE_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(cache_ttl_ms);
+        let rate_limit_burst = env::var("ROUTER_PLAN_RATE_BURST")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30.0);
+        let rate_limit_refill_per_sec = env::var("ROUTER_PLAN_RATE_REFILL_PER_SEC")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10.0);
 
         let sticky_secret = match env::var("ROUTER_STICKY_SECRET") {
             Ok(value) if !value.is_empty() => {
@@ -71,9 +86,12 @@ impl RouterConfig {
             server: ServerConfig { bind_addr, workers },
             overlay_dir,
             cache_ttl_ms,
+            cache_stale_ms,
             sticky_secret,
             policy,
             catalog,
+            rate_limit_burst,
+            rate_limit_refill_per_sec,
         })
     }
 }

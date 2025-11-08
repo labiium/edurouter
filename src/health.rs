@@ -29,6 +29,12 @@ pub struct HealthStore {
     inner: Arc<DashMap<String, HealthStats>>,
 }
 
+impl Default for HealthStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HealthStore {
     pub fn new() -> Self {
         Self {
@@ -44,10 +50,7 @@ impl HealthStore {
     }
 
     pub fn update(&self, feedback: &RouteFeedback) {
-        let mut entry = self
-            .inner
-            .entry(feedback.model_id.clone())
-            .or_insert_with(HealthStats::default);
+        let mut entry = self.inner.entry(feedback.model_id.clone()).or_default();
         let alpha = 0.2_f32;
         let latency = feedback.duration_ms as f32;
         entry.p50_ms = blend(entry.p50_ms, latency, alpha);

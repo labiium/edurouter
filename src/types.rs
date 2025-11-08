@@ -4,31 +4,23 @@ use std::collections::HashMap;
 
 pub type Currency = String;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum PrivacyMode {
+    #[default]
     FeaturesOnly,
     Summary,
     Full,
 }
 
-impl Default for PrivacyMode {
-    fn default() -> Self {
-        Self::FeaturesOnly
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ApiKind {
+    #[default]
     Responses,
     Chat,
-}
-
-impl Default for ApiKind {
-    fn default() -> Self {
-        ApiKind::Responses
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -37,18 +29,14 @@ pub struct TraceCtx {
     pub tracestate: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ContentLevel {
+    #[default]
     None,
     Summary,
     Full,
-}
-
-impl Default for ContentLevel {
-    fn default() -> Self {
-        ContentLevel::None
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -127,15 +115,11 @@ pub struct RouteRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum UpstreamMode {
+    #[default]
     Responses,
     Chat,
-}
-
-impl Default for UpstreamMode {
-    fn default() -> Self {
-        UpstreamMode::Responses
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -193,6 +177,24 @@ pub struct PolicyInfo {
     pub explain: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GovernanceBudgets {
+    pub total: Option<u32>,
+    pub l3_max: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GovernanceApprovals {
+    #[serde(default)]
+    pub require_for_levels: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GovernanceEcho {
+    pub budgets: GovernanceBudgets,
+    pub approvals: GovernanceApprovals,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Upstream {
     pub base_url: String,
@@ -208,22 +210,16 @@ pub struct RoutePlan {
     pub schema_version: String,
     pub route_id: String,
     pub upstream: Upstream,
-    #[serde(default)]
-    pub limits: Option<Limits>,
-    #[serde(default)]
-    pub prompt_overlays: Option<PromptOverlays>,
-    #[serde(default)]
-    pub hints: Option<Hints>,
-    #[serde(default)]
-    pub fallbacks: Option<Vec<Fallback>>,
-    #[serde(default)]
-    pub cache: Option<CacheHints>,
-    #[serde(default)]
-    pub stickiness: Option<Stickiness>,
-    #[serde(default)]
-    pub policy: Option<PolicyInfo>,
-    #[serde(default)]
-    pub content_used: Option<ContentLevel>,
+    pub limits: Limits,
+    pub prompt_overlays: PromptOverlays,
+    pub hints: Hints,
+    pub fallbacks: Vec<Fallback>,
+    pub cache: CacheHints,
+    pub stickiness: Stickiness,
+    pub policy: PolicyInfo,
+    pub policy_rev: String,
+    pub content_used: ContentLevel,
+    pub governance_echo: GovernanceEcho,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -379,15 +375,39 @@ pub struct PolicyDefaults {
     pub latency_ms: f32,
     pub timeout_ms: u32,
     pub max_output_tokens: u32,
+    pub max_overlay_bytes: u32,
     pub stickiness: PolicyStickiness,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PolicyEscalations {
+    pub token_len_over: Option<u32>,
+    pub uncertainty_regex: Option<String>,
+    pub scpi_error_present: Option<bool>,
+    pub teacher_boost_tier: Option<String>,
+    pub default_tier: Option<String>,
+    pub fallback_tier: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PolicyTier {
+    pub id: String,
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyDocument {
+    pub id: String,
     pub revision: String,
     pub schema_version: String,
     pub weights: PolicyWeights,
     pub defaults: PolicyDefaults,
+    #[serde(default)]
+    pub governance: GovernanceEcho,
+    #[serde(default)]
+    pub escalations: PolicyEscalations,
+    #[serde(default)]
+    pub tiers: HashMap<String, PolicyTier>,
     #[serde(default)]
     pub aliases: HashMap<String, PolicyAliasRule>,
     #[serde(default)]

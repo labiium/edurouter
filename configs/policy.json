@@ -1,0 +1,81 @@
+{
+  "id": "edu_cost_routed_v5",
+  "revision": "pol_v1",
+  "schema_version": "1.1",
+  "weights": {
+    "cost": 0.4,
+    "latency": 0.25,
+    "health": 0.2,
+    "context": 0.15,
+    "tier_bonus": 0.2
+  },
+  "defaults": {
+    "cost_norm_micro": 3200.0,
+    "latency_ms": 900.0,
+    "timeout_ms": 20000,
+    "max_output_tokens": 512,
+    "max_overlay_bytes": 16384,
+    "stickiness": {
+      "window_ms": 600,
+      "max_turns": 3
+    }
+  },
+  "governance": {
+    "budgets": {
+      "total": 5,
+      "l3_max": 2
+    },
+    "approvals": {
+      "require_for_levels": [
+        "L3"
+      ]
+    }
+  },
+  "escalations": {
+    "token_len_over": 8000,
+    "uncertainty_regex": "(?i)unsure|uncertain|confused",
+    "scpi_error_present": true,
+    "teacher_boost_tier": "T3",
+    "fallback_tier": "T3"
+  },
+  "tiers": {
+    "T1": {
+      "id": "T1",
+      "description": "Low-cost routing tier"
+    },
+    "T3": {
+      "id": "T3",
+      "description": "High assurance routing tier"
+    }
+  },
+  "aliases": {
+    "edu-general": {
+      "candidates": [
+        "gpt-4o-educator",
+        "gpt-4o-tutor"
+      ],
+      "require_caps": [
+        "text"
+      ],
+      "allowed_regions": []
+    },
+    "edu-advanced": {
+      "candidates": [
+        "gpt-4o-tutor"
+      ],
+      "require_caps": [
+        "text"
+      ],
+      "allowed_regions": []
+    }
+  },
+  "overlay_map": {
+    "edu-general": {
+      "teacher": "assessment-mode",
+      "default": "troubleshoot-first"
+    }
+  },
+  "overlay_defaults": {
+    "default": "troubleshoot-first"
+  }
+}
