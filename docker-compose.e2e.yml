@@ -1,18 +1,16 @@
-version: "3.9"
-
 services:
   edurouter:
     build:
       context: .
     image: edurouter:e2e
     environment:
-      ROUTER_POLICY_PATH: /app/configs/policy.json
-      ROUTER_CATALOG_PATH: /app/configs/catalog.json
-      ROUTER_OVERLAY_DIR: /app/configs/overlays
+      ROUTER_POLICY_PATH: /workspace/configs/policy.json
+      ROUTER_CATALOG_PATH: /workspace/configs/catalog.json
+      ROUTER_OVERLAY_DIR: /workspace/configs/overlays
       ROUTER_CACHE_TTL_MS: 600
       ROUTER_CACHE_STALE_MS: 600
-    volumes:
-      - ./configs:/app/configs:ro
+      ROUTER_PLAN_RATE_BURST: 5000
+      ROUTER_PLAN_RATE_REFILL_PER_SEC: 5000
     ports:
       - "9099:9099"
     healthcheck:
@@ -23,25 +21,41 @@ services:
       start_period: 5s
 
   routiium:
-    image: ghcr.io/labiium/routiium:latest
+    build:
+      context: "${ROUTIIUM_SOURCE_DIR:-../routiium}"
+      dockerfile: "${ROUTIIUM_DOCKERFILE:-Dockerfile}"
+    image: routiium:local
+    env_file:
+      - .env
     environment:
-      ROUTIIUM_ROUTER_URL: http://edurouter:9099
+      BIND_ADDR: ${ROUTIIUM_BIND_ADDR:-0.0.0.0:8088}
+      ROUTIIUM_SLED_PATH: ${ROUTIIUM_SLED_PATH:-/data/keys.db}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY is required for Routiium}
+      ROUTIIUM_BACKENDS: ${ROUTIIUM_BACKENDS:-}
+      ROUTIIUM_ROUTER_URL: ${ROUTIIUM_ROUTER_URL:-http://edurouter:9099}
     depends_on:
       edurouter:
         condition: service_healthy
-    command: ["sleep", "infinity"]
+    ports:
+      - "${ROUTIIUM_PORT:-8088}:8088"
+    volumes:
+      - routiium-data:/data
 
   tester:
-    image: python:3.11-slim
+    build:
+      context: ./e2e
+    image: edurouter-tester:e2e
     working_dir: /e2e
     environment:
       ROUTER_URL: http://edurouter:9099
-      ROUTIIUM_URL: http://routiium:8080
+      ROUTIIUM_URL: http://routiium:8088
       SAMPLE_REQUESTS: "50"
       CONCURRENCY: "4"
       OUTPUT_PATH: /e2e/perf_report.json
-    volumes:
-      - ./e2e:/e2e
     depends_on:
       edurouter:
         condition: service_healthy
+
+volumes:
+  routiium-data:

@@ -14,3 +14,15 @@
 # Logs
 *.log
 logs/
+
+# Python tooling / artifacts
+__pycache__/
+*.pyc
+python_tests/__pycache__/
+
+# Generated benchmark outputs
+e2e/perf_report.json
+e2e/llm_characterization.json
+openai_model_characterization.json
+chat_router_demo_last_response.json
+debug_gpt5.json
