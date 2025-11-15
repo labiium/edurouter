@@ -1,6 +1,6 @@
 {
-  "id": "edu_cost_routed_v5",
-  "revision": "pol_v1",
+  "id": "openai_multimodal_pack_v1",
+  "revision": "pol_v2",
   "schema_version": "1.1",
   "weights": {
     "cost": 0.4,
@@ -26,9 +26,7 @@
       "l3_max": 2
     },
     "approvals": {
-      "require_for_levels": [
-        "L3"
-      ]
+      "require_for_levels": ["L3"]
     }
   },
   "escalations": {
@@ -41,38 +39,36 @@
   "tiers": {
     "T1": {
       "id": "T1",
-      "description": "Low-cost routing tier"
+      "description": "Fastest & cheapest (GPT-5 nano)."
+    },
+    "T2": {
+      "id": "T2",
+      "description": "Balanced cost/perf (GPT-4.1 nano)."
     },
     "T3": {
       "id": "T3",
-      "description": "High assurance routing tier"
+      "description": "High assurance GPT-5 mini."
     }
   },
   "aliases": {
-    "edu-general": {
-      "candidates": [
-        "gpt-4o-educator",
-        "gpt-4o-tutor"
-      ],
-      "require_caps": [
-        "text"
-      ],
+    "openai-multimodal": {
+      "candidates": ["gpt-5-nano", "gpt-4.1-nano", "gpt-5-mini"],
+      "require_caps": ["text", "image"],
       "allowed_regions": []
     },
-    "edu-advanced": {
-      "candidates": [
-        "gpt-4o-tutor"
-      ],
-      "require_caps": [
-        "text"
-      ],
+    "openai-premium": {
+      "candidates": ["gpt-5-mini"],
+      "require_caps": ["text", "image"],
       "allowed_regions": []
     }
   },
   "overlay_map": {
-    "edu-general": {
+    "openai-multimodal": {
       "teacher": "assessment-mode",
       "default": "troubleshoot-first"
+    },
+    "openai-premium": {
+      "default": "assessment-mode"
     }
   },
   "overlay_defaults": {

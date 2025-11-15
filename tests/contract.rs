@@ -50,7 +50,7 @@ fn base_plan_request(request_id: &str) -> Value {
     json!({
         "schema_version": "1.1",
         "request_id": request_id,
-        "alias": "edu-general",
+        "alias": "openai-multimodal",
         "api": "responses",
         "privacy_mode": "features_only",
         "stream": false

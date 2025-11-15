@@ -1,0 +1,46 @@
+services:
+  edurouter:
+    build:
+      context: .
+    image: edurouter:dev
+    environment:
+      ROUTER_POLICY_PATH: /app/configs/policy.json
+      ROUTER_CATALOG_PATH: /app/configs/catalog.json
+      ROUTER_OVERLAY_DIR: /app/configs/overlays
+      ROUTER_CACHE_TTL_MS: 600
+      ROUTER_CACHE_STALE_MS: 600
+    volumes:
+      - ./configs:/app/configs:ro
+    ports:
+      - "9099:9099"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9099/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  routiium:
+    build:
+      context: ../routiium
+      dockerfile: Dockerfile
+    image: routiium:local
+    env_file:
+      - .env
+    depends_on:
+      edurouter:
+        condition: service_healthy
+    environment:
+      BIND_ADDR: ${ROUTIIUM_BIND_ADDR:-0.0.0.0:8088}
+      ROUTIIUM_SLED_PATH: ${ROUTIIUM_SLED_PATH:-/data/keys.db}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY is required for Routiium}
+      ROUTIIUM_BACKENDS: ${ROUTIIUM_BACKENDS:-}
+      ROUTIIUM_ROUTER_URL: ${ROUTIIUM_ROUTER_URL:-http://edurouter:9099}
+    ports:
+      - "${ROUTIIUM_PORT:-8088}:8088"
+    volumes:
+      - routiium-data:/data
+
+volumes:
+  routiium-data:
