@@ -111,6 +111,20 @@ Point Routiium at the router by setting `ROUTIIUM_ROUTER_URL=http://router:9099`
 
 These vars are read once at startup; policy, catalog, and overlays can then be hot-reloaded via admin endpoints.
 
+### Embedding-Aware Routing
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `ROUTER_EMBEDDINGS_ENABLED` | `0` | Enable canonical-task similarity routing when set to `1`. |
+| `ROUTER_CANONICAL_TASKS` | `./configs/canonical_tasks.json` | Path to the canonical task bank. |
+| `ROUTER_EMBEDDINGS_PROVIDER` | `fastembed` | Embedding backend (`fastembed` for ONNX inference, `hashed` for deterministic tests). |
+| `ROUTER_EMBEDDINGS_FASTEMBED_MODEL` | `bge-small-en-v1.5` | FastEmbed model slug or model code. |
+| `ROUTER_EMBEDDINGS_TOP_K` | `3` | Number of canonical tasks considered per request. |
+| `ROUTER_EMBEDDINGS_CACHE_MS` | `300000` | TTL for per-text embedding cache. |
+| `ROUTER_EMBEDDINGS_ALLOW_HASHED` | `0` | Must be `1` to use the `hashed` provider (intended only for CI/tests). |
+
+FastEmbed downloads the model once at startup; hashed mode is a lightweight deterministic fallback useful for CI.
+
 ### Policy Document (summary)
 
 - `revision` / `schema_version` - surfaced in headers for traceability.
@@ -216,6 +230,7 @@ What it does:
 - Waits for Routiium to come online, mints a short-lived API key via `/keys/generate`, and shares it with follow-up checks.
 - Writes a JSON report to `e2e/perf_report.json` summarizing min/avg/p95 latency and cache hit ratios.
 - Performs a multimodal chat-completions sanity check through Routiium using `python_tests/test_openai_models.py` and saves the transcript + usage data to `e2e/llm_characterization.json`.
+- Verifies embedding-aware routing by calling `python_tests/test_embedding_routing.py`, ensuring canonical tasks steer traffic to the expected model.
 
 Environment variables you can override:
 

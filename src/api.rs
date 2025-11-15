@@ -134,6 +134,17 @@ fn respond_with_plan(
     if let Some(reason) = &outcome.route_reason {
         response.append_header(("X-Route-Why", reason.clone()));
     }
+    if let Some(canonical) = &outcome.plan.canonical {
+        if let Some(model) = &canonical.model {
+            response.append_header(("X-Canonical-Model", model.clone()));
+        }
+        if !canonical.ids.is_empty() {
+            response.append_header(("X-Canonical-Ids", canonical.ids.join(",")));
+        }
+        if let Some(score) = canonical.score {
+            response.append_header(("X-Canonical-Score", format!("{score:.3}")));
+        }
+    }
     response.append_header((
         "X-Content-Used",
         content_level_str(&outcome.plan.content_used),

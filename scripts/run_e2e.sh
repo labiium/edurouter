@@ -4,6 +4,7 @@ set -euo pipefail
 PROJECT_ROOT=$(pwd)
 ENV_FILE=${ENV_FILE:-"${PROJECT_ROOT}/.env"}
 RUN_LLM_CHARACTERIZATION=${RUN_LLM_CHARACTERIZATION:-1}
+RUN_EMBEDDING_TEST=${RUN_EMBEDDING_TEST:-1}
 LLM_SAMPLES=${LLM_SAMPLES:-1}
 LLM_OUTPUT_PATH=${LLM_OUTPUT_PATH:-"${PROJECT_ROOT}/e2e/llm_characterization.json"}
 
@@ -129,6 +130,24 @@ run_llm_characterization() {
   echo "Saved LLM characterization report to $LLM_OUTPUT_PATH"
 }
 
+run_embedding_test() {
+  if [[ ${RUN_EMBEDDING_TEST} -ne 1 ]]; then
+    echo "Skipping embedding routing test (disabled)"
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "python3 is required to run python_tests/test_embedding_routing.py" >&2
+    return 1
+  fi
+  local router="${ROUTER_URL:-http://localhost:9099}"
+  echo "Verifying embedding-aware routing (${router})"
+  python3 python_tests/test_embedding_routing.py \
+    --router-url "$router" \
+    --alias "openai-multimodal" \
+    --summary "Explain each step when proving a high-school algebra identity." \
+    --expected-model "gpt-5-mini"
+}
+
 load_dotenv "$ENV_FILE"
 resolve_routiium_source
 
@@ -142,7 +161,8 @@ ROUTIIUM_ROUTER_URL=${ROUTIIUM_ROUTER_URL:-"http://edurouter:9099"}
 ROUTIIUM_SLED_PATH=${ROUTIIUM_SLED_PATH:-"/data/keys.db"}
 ROUTIIUM_BASE=${ROUTIIUM_BASE:-$ROUTIIUM_HOST_URL}
 ROUTIIUM_BASE_URL=${ROUTIIUM_BASE_URL:-$(normalize_base_url "$ROUTIIUM_HOST_URL")}
-export ROUTIIUM_PORT ROUTIIUM_BIND_ADDR ROUTIIUM_ROUTER_URL ROUTIIUM_SLED_PATH ROUTIIUM_BASE ROUTIIUM_BASE_URL
+ROUTER_URL=${ROUTER_URL:-"http://localhost:9099"}
+export ROUTIIUM_PORT ROUTIIUM_BIND_ADDR ROUTIIUM_ROUTER_URL ROUTIIUM_SLED_PATH ROUTIIUM_BASE ROUTIIUM_BASE_URL ROUTER_URL
 
 detect_compose() {
   if command -v docker >/dev/null 2>&1; then
@@ -205,5 +225,6 @@ if [[ ${TESTER_EXIT_CODE} -ne 0 ]]; then
 fi
 
 run_llm_characterization
+run_embedding_test
 
 echo "E2E test completed. Containers will be stopped."

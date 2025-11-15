@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use base64::Engine as _;
 use std::{env, path::PathBuf};
 
@@ -21,6 +21,7 @@ pub struct RouterConfig {
     pub catalog: CatalogDocument,
     pub rate_limit_burst: f64,
     pub rate_limit_refill_per_sec: f64,
+    pub embedding: Option<EmbeddingConfig>,
 }
 
 impl RouterConfig {
@@ -81,6 +82,7 @@ impl RouterConfig {
         let catalog: CatalogDocument = serde_json::from_str(&catalog_json)
             .or_else(|_| serde_yaml::from_str(&catalog_json))
             .with_context(|| "parse catalog document")?;
+        let embedding = embedding_from_env()?;
 
         Ok(Self {
             server: ServerConfig { bind_addr, workers },
@@ -92,6 +94,82 @@ impl RouterConfig {
             catalog,
             rate_limit_burst,
             rate_limit_refill_per_sec,
+            embedding,
         })
     }
+}
+
+fn embedding_from_env() -> Result<Option<EmbeddingConfig>> {
+    if !env_truthy("ROUTER_EMBEDDINGS_ENABLED") {
+        return Ok(None);
+    }
+
+    let canonical_path = PathBuf::from(
+        env::var("ROUTER_CANONICAL_TASKS")
+            .unwrap_or_else(|_| "./configs/canonical_tasks.json".into()),
+    );
+    let top_k = env::var("ROUTER_EMBEDDINGS_TOP_K")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3)
+        .max(1);
+    let cache_ttl_ms = env::var("ROUTER_EMBEDDINGS_CACHE_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(300_000);
+    let provider_name = env::var("ROUTER_EMBEDDINGS_PROVIDER")
+        .unwrap_or_else(|_| "fastembed".into())
+        .to_ascii_lowercase();
+    let provider = match provider_name.as_str() {
+        "fastembed" => EmbeddingProviderKind::FastEmbed {
+            model: env::var("ROUTER_EMBEDDINGS_FASTEMBED_MODEL")
+                .unwrap_or_else(|_| "bge-small-en-v1.5".into()),
+        },
+        "hashed" => {
+            if !env_truthy("ROUTER_EMBEDDINGS_ALLOW_HASHED") {
+                return Err(anyhow!(
+                    "ROUTER_EMBEDDINGS_PROVIDER=hashed requires ROUTER_EMBEDDINGS_ALLOW_HASHED=1"
+                ));
+            }
+            EmbeddingProviderKind::Hashed
+        }
+        other => {
+            return Err(anyhow!(
+                "unknown ROUTER_EMBEDDINGS_PROVIDER '{other}'. expected fastembed or hashed"
+            ))
+        }
+    };
+
+    Ok(Some(EmbeddingConfig {
+        canonical_path,
+        top_k,
+        cache_ttl_ms,
+        provider,
+    }))
+}
+
+fn env_truthy(key: &str) -> bool {
+    env::var(key)
+        .ok()
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+#[derive(Debug, Clone)]
+pub struct EmbeddingConfig {
+    pub canonical_path: PathBuf,
+    pub top_k: usize,
+    pub cache_ttl_ms: u64,
+    pub provider: EmbeddingProviderKind,
+}
+
+#[derive(Debug, Clone)]
+pub enum EmbeddingProviderKind {
+    FastEmbed { model: String },
+    Hashed,
 }

@@ -77,6 +77,7 @@ pub trait EmbeddingProvider {
 Possible implementations:
 - **OpenAI `text-embedding-3-large`:** use `reqwest` client already in AppState. Pros: accurate, easy. Cons: adds network hop and cost.
 - **Local model (e.g., `qdrant/fastembed`, `ggml`):** add dependency to run in-process (via `fastembed` crate or cbindgen). Pros: avoids network latency. Cons: increases binary size.
+- **Deterministic hash backend:** lightweight fallback used in tests/CI so the router can exercise the pipeline without downloading ONNX models. Guarded by `ROUTER_EMBEDDINGS_ALLOW_HASHED=1` and not recommended for production.
 
 For minimal latency, prefer a local embedding server (maybe a sidecar service) and call it over localhost with low timeout. Provide env config:
 

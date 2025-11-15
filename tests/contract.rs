@@ -3,7 +3,7 @@ use actix_web::{
     test, web, App,
 };
 use router::api;
-use router::config::{RouterConfig, ServerConfig};
+use router::config::{EmbeddingConfig, EmbeddingProviderKind, RouterConfig, ServerConfig};
 use router::engine::RouterEngine;
 use router::types::{CatalogDocument, PolicyDocument};
 use serde_json::{json, Value};
@@ -20,6 +20,12 @@ fn test_router_config() -> RouterConfig {
     let catalog: CatalogDocument =
         serde_json::from_str(&catalog_raw).expect("parse catalog fixture");
     policy.defaults.stickiness.window_ms = 200;
+    let embedding = EmbeddingConfig {
+        canonical_path: PathBuf::from("configs/canonical_tasks.json"),
+        top_k: 2,
+        cache_ttl_ms: 60_000,
+        provider: EmbeddingProviderKind::Hashed,
+    };
 
     RouterConfig {
         server: ServerConfig {
@@ -34,6 +40,7 @@ fn test_router_config() -> RouterConfig {
         catalog,
         rate_limit_burst: 500.0,
         rate_limit_refill_per_sec: 500.0,
+        embedding: Some(embedding),
     }
 }
 
@@ -375,4 +382,82 @@ async fn fallback_list_present() {
     let fallbacks = body["fallbacks"].as_array().unwrap();
     assert!(!fallbacks.is_empty());
     assert!(fallbacks[0]["model_id"].is_string());
+}
+
+#[actix_web::test]
+async fn canonical_hint_routing_emits_headers() {
+    let engine = bootstrap_engine().await;
+    let app = test::init_service(
+        App::new()
+            .app_data(engine.clone())
+            .configure(api::configure),
+    )
+    .await;
+
+    let mut body = base_plan_request("canonical-match");
+    body["conversation"] = json!({
+        "summary": "Explain each step when proving a high-school algebra identity."
+    });
+
+    let req = test::TestRequest::post()
+        .uri("/route/plan")
+        .set_json(&body)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let headers = resp.headers().clone();
+    assert_eq!(headers.get("X-Canonical-Model").unwrap(), "gpt-5-mini");
+    let payload: Value = test::read_body_json(resp).await;
+    assert_eq!(payload["upstream"]["model_id"], "gpt-5-mini");
+    assert_eq!(payload["canonical"]["model"], "gpt-5-mini");
+    assert!(payload["canonical"]["ids"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("math_proof")));
+}
+
+#[actix_web::test]
+async fn canonical_summaries_route_to_different_models() {
+    let engine = bootstrap_engine().await;
+    let app = test::init_service(
+        App::new()
+            .app_data(engine.clone())
+            .configure(api::configure),
+    )
+    .await;
+
+    let mut math = base_plan_request("canonical-math");
+    math["conversation"] = json!({
+        "summary": "Explain each step when proving a high-school algebra identity."
+    });
+
+    let resp_math = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/route/plan")
+            .set_json(&math)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        resp_math.headers().get("X-Canonical-Model").unwrap(),
+        "gpt-5-mini"
+    );
+
+    let mut chat = base_plan_request("canonical-chat");
+    chat["conversation"] = json!({
+        "summary": "Tell me a short friendly joke about school."
+    });
+    let resp_chat = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/route/plan")
+            .set_json(&chat)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        resp_chat.headers().get("X-Canonical-Model").unwrap(),
+        "gpt-4.1-nano"
+    );
+    assert_eq!(resp_chat.headers().get("X-Route-Cache").unwrap(), "miss");
 }

@@ -1,6 +1,7 @@
 pub mod api;
 pub mod cache;
 pub mod config;
+pub mod embedding;
 pub mod engine;
 pub mod errors;
 pub mod health;

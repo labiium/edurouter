@@ -25,6 +25,7 @@ impl CacheKey {
         privacy: PrivacyMode,
         api: ApiKind,
         freeze_hash: u64,
+        canonical_hash: u64,
     ) -> Self {
         let mut hasher = AHasher::default();
         hasher.write(policy_rev.as_bytes());
@@ -40,6 +41,7 @@ impl CacheKey {
         hasher.write_u8(privacy as u8);
         hasher.write_u8(api as u8);
         hasher.write_u64(freeze_hash);
+        hasher.write_u64(canonical_hash);
         CacheKey(hasher.finish())
     }
 }

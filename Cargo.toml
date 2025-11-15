@@ -34,3 +34,5 @@ bitflags = "2.4"
 hex = "0.4"
 dotenvy = "0.15"
 regex = "1.10"
+fastembed = { version = "5", default-features = true }
+async-trait = "0.1"

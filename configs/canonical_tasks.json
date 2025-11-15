@@ -1,0 +1,23 @@
+[
+  {
+    "id": "math_proof",
+    "text": "Explain each step when proving a high-school algebra identity.",
+    "preferred_model": "gpt-5-mini",
+    "weight": 1.3,
+    "tags": ["math", "reasoning"]
+  },
+  {
+    "id": "light_chat",
+    "text": "Tell me a short friendly joke about school.",
+    "preferred_model": "gpt-4.1-nano",
+    "weight": 0.9,
+    "tags": ["chat"]
+  },
+  {
+    "id": "vision_brief",
+    "text": "Describe what you observe in a simple picture in a single paragraph.",
+    "preferred_model": "gpt-5-nano",
+    "weight": 1.0,
+    "tags": ["vision"]
+  }
+]

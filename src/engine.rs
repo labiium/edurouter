@@ -1,5 +1,6 @@
 use crate::cache::{CacheKey, PlanCache};
 use crate::config::RouterConfig;
+use crate::embedding::{canonical_hash, CanonicalSelection, EmbeddingRuntime};
 use crate::errors::RouterError;
 use crate::health::{HealthStats, HealthStore};
 use crate::rate::RateLimiter;
@@ -119,6 +120,7 @@ pub struct RouterEngine {
     health: HealthStore,
     metrics: RouterMetrics,
     rate_limiter: RateLimiter,
+    embedding: Option<Arc<EmbeddingRuntime>>,
 }
 
 pub struct PlanOutcome {
@@ -140,6 +142,11 @@ impl RouterEngine {
         let catalog = ArcSwap::from_pointee(compiled_catalog);
         let overlays = ArcSwap::from_pointee(overlays);
 
+        let embedding = match cfg.embedding.as_ref() {
+            Some(settings) => Some(Arc::new(EmbeddingRuntime::new(settings).await?)),
+            None => None,
+        };
+
         Ok(Self {
             overlay_dir: cfg.overlay_dir.to_string_lossy().into_owned(),
             cache,
@@ -151,6 +158,7 @@ impl RouterEngine {
             health: HealthStore::new(),
             metrics: RouterMetrics::default(),
             rate_limiter: RateLimiter::new(cfg.rate_limit_burst, cfg.rate_limit_refill_per_sec),
+            embedding,
         })
     }
 
@@ -263,6 +271,23 @@ impl RouterEngine {
         );
         let forced_tag = forced_tier.as_ref().map(|tier| format!("tier:{}", tier));
 
+        let canonical_match = if let Some(runtime) = self.embedding.as_ref() {
+            match runtime.select(&req).await {
+                Ok(result) => result,
+                Err(err) => {
+                    tracing::warn!("embedding routing failed: {err}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        if let Some(selection) = canonical_match.as_ref() {
+            if base_reason.is_none() {
+                base_reason = Some(format!("canonical:{}", selection.model_id));
+            }
+        }
+
         let cache_key = CacheKey::derive(
             &policy.doc.revision,
             hash_alias(&req.alias),
@@ -277,6 +302,7 @@ impl RouterEngine {
             req.privacy_mode,
             req.api,
             hash_string(&freeze_key),
+            canonical_match.as_ref().map(canonical_hash).unwrap_or(0),
         );
 
         if let Some(hit) = self.cache.get(&cache_key).await {
@@ -323,6 +349,7 @@ impl RouterEngine {
             region_mask,
             boost,
             forced_tier: forced_tag_value.as_deref(),
+            canonical_hint: canonical_match.as_ref(),
         })?;
         if candidates.is_empty() && forced_tag_value.is_some() {
             base_reason = None;
@@ -338,6 +365,7 @@ impl RouterEngine {
                 region_mask,
                 boost,
                 forced_tier: None,
+                canonical_hint: canonical_match.as_ref(),
             })?;
         }
 
@@ -375,6 +403,7 @@ impl RouterEngine {
             cache_ttl_ms: self.cache_ttl_ms as u32,
             freeze_key,
             catalog_revision: &catalog_revision,
+            canonical: canonical_match.clone(),
         })?;
         let mut response_plan = plan_blueprint.clone();
         let issued_stickiness = self.attach_stickiness(
@@ -468,6 +497,7 @@ struct ScoreContext<'req, 'a, 'tier> {
     region_mask: RegionMask,
     boost: bool,
     forced_tier: Option<&'tier str>,
+    canonical_hint: Option<&'tier CanonicalSelection>,
 }
 
 #[derive(Clone, Copy)]
@@ -489,6 +519,7 @@ struct PlanAssembly<'req, 'a> {
     cache_ttl_ms: u32,
     freeze_key: String,
     catalog_revision: &'req str,
+    canonical: Option<CanonicalSelection>,
 }
 
 fn compile_catalog(doc: &CatalogDocument) -> Result<CompiledCatalog, RouterError> {
@@ -922,7 +953,7 @@ fn score_candidates<'req, 'a, 'tier>(
             }
         }
 
-        let score = compute_score(
+        let mut score = compute_score(
             model,
             &health_snapshot,
             ScoreFactors {
@@ -934,6 +965,11 @@ fn score_candidates<'req, 'a, 'tier>(
             ctx.policy,
             ctx.boost,
         );
+        if let Some(hint) = ctx.canonical_hint {
+            if hint.model_id == model.id {
+                score += hint.score;
+            }
+        }
 
         scored.push(CandidateRef {
             model,
@@ -1063,6 +1099,11 @@ fn choose_primary<'a>(
 
 fn materialize_plan(ctx: PlanAssembly<'_, '_>) -> Result<RoutePlan, RouterError> {
     let policy_revision = ctx.policy.revision.clone();
+    let canonical_block = ctx.canonical.as_ref().map(|sel| CanonicalContext {
+        ids: sel.canonical_ids.clone(),
+        model: Some(sel.model_id.clone()),
+        score: Some(sel.score),
+    });
     let plan = RoutePlan {
         schema_version: ctx.req.schema_version.clone(),
         route_id: Uuid::new_v4().to_string(),
@@ -1119,6 +1160,7 @@ fn materialize_plan(ctx: PlanAssembly<'_, '_>) -> Result<RoutePlan, RouterError>
         policy_rev: policy_revision.clone(),
         content_used: ctx.content_used,
         governance_echo: ctx.policy.governance.clone(),
+        canonical: canonical_block,
     };
 
     Ok(plan)

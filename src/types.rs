@@ -146,6 +146,14 @@ pub struct Hints {
     pub provider: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CanonicalContext {
+    #[serde(default)]
+    pub ids: Vec<String>,
+    pub model: Option<String>,
+    pub score: Option<f32>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Fallback {
     pub base_url: String,
@@ -220,6 +228,9 @@ pub struct RoutePlan {
     pub policy_rev: String,
     pub content_used: ContentLevel,
     pub governance_echo: GovernanceEcho,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub canonical: Option<CanonicalContext>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
